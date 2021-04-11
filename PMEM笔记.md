@@ -297,9 +297,135 @@ TOID宏封装了对持久性内存对象的访问细节，使得用户使用更�
 
 ### part 4 事务性分配内存
 
+先看一下在内存中编程的例子
+
+```c++
+struct rectangle {
+	int a;
+	int b;
+};
+
+int area_calc(const struct rectangle *rect) {
+	return rect->a * rect->b;
+}
+
+...
+struct rectangle *rect = malloc(sizeof *rect);
+if (rect == NULL) return;
+rect->a = 5;
+rect->b = 10;
+int p = area_calc(rect);
+/* busy work */
+free(rect):
+```
+
+然后改为在NVM中
+
+```c++
+/* struct rectangle doesn't change */
+
+struct my_root {
+	TOID(struct rectangle) rect;
+};
+
+POBJ_LAYOUT_BEGIN(rect_calc);
+	POBJ_LAYOUT_ROOT(rect_calc, struct my_root);
+	POBJ_LAYOUT_TOID(rect_calc, struct rectangle);
+POBJ_LAYOUT_END(rect_calc);
+
+int area_calc(const TOID(struct rectangle) rect) {
+	return D_RO(rect)->a * D_RO(rect)->b;
+}
+
+TOID(struct my_root) root = POBJ_ROOT(pop);
+TX_BEGIN(pop) {
+	TX_ADD(root); /* we are going to operate on the root object */
+	TOID(struct rectangle) rect = TX_NEW(struct rectangle);
+	D_RW(rect)->x = 5;
+	D_RW(rect)->y = 10;
+	D_RW(root)->rect = rect;
+} TX_END
+
+int p = area_calc(D_RO(root)->rect);
+/* busy work */
+```
+
+上述代码中的新出现的宏定义：
+
+TX_ADD，就是对pmemobj_tx_add_range的包装
+
+TX_NEW，分配一块大小为sizeof(T)的内存，返回一个TOID（T），与这个类似的还有TX_ALLOC，可以分配自定义大小的内存
+
+如何释放这个空间：
+
+```c++
+TX_BEGIN(pop) {
+	TX_ADD(root);
+	TX_FREE(D_RW(root)->rect);
+	D_RW(root)->rect = TOID_NULL(struct rectangle);
+} TX_END
+```
+
 
 
 ### part 5 原子动态分配内存
 
-事务性的分配内存虽然方便写
+事务性的分配内存虽然写起来方便，但是因为要维护undo log所以开销很大。这里还提供了一个非事务的原子性的分配内存方式。
+
+这里使用POBJ_ZNEW或者POBJ_ZALLOC将其初始化为0或者提供构造函数（使用POBJ_NEW和POBJ_ALLOC函数）
+
+```c++
+
+// 作为构造函数
+int rect_construct(PMEMobjpool *pop, void *ptr, void *arg) {
+	struct rectangle *rect = ptr;
+	rect->x = 5;
+	rect->y = 10;
+	pmemobj_persist(pop, rect, sizeof *rect);
+ 
+	return 0;
+}
+// 注意此处的内存操作是原子的，传入的构造函数用于内存初始化
+POBJ_NEW(pop, &D_RW(root)->rect, struct rectangle, rect_construct, NULL);
+int p = perimeter_calc(D_RO(root)->rect);
+/* busy work */
+ 
+// 这里的释放也是原子的
+POBJ_FREE(&D_RW(root)->rect);
+```
+
+
+
+在PMDK中，已经存在的对象都存储在一个集合中， 可以通过POBJ_FIRST和POBJ_NEXT接口来访问和遍历这些对象，即可以将其看作一个无序链表，可以通过它遍历对象。
+
+```c++
+TOID(struct rectangle) rect = POBJ_FIRST(pop, struct rectangle);
+
+rect = POBJ_NEXT(rect, struct rectangle);
+```
+
+PMDK也提供了遍历的宏，而不用手动遍历，四个宏定义如下
+
+```c++
+/*
+ * Iterates through every existing allocated object.
+ */
+#define POBJ_FOREACH(pop, varoid)\
+/*
+ * Safe variant of POBJ_FOREACH in which pmemobj_free on varoid is allowed
+ */
+#define POBJ_FOREACH_SAFE(pop, varoid, nvaroid)\
+
+/*
+ * Iterates through every object of the specified type.
+ */
+#define POBJ_FOREACH_TYPE(pop, var)\
+
+/*
+ * Safe variant of POBJ_FOREACH_TYPE in which pmemobj_free on var
+ * is allowed.
+ */
+#define POBJ_FOREACH_SAFE_TYPE(pop, var, nvar)\
+
+```
 
