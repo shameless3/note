@@ -44,7 +44,7 @@ typedef struct pmemoid {
 
 而通过pool id和offset即可唯一定位，（void *)((uint64_t)pool + oid.off)
 
-这也是pmemobj_direct函数做的事情。
+这也是pmemobj_direct函数做的事情，即会返回一个可以解引用的指针
 
 **root object**
 
@@ -282,7 +282,7 @@ _toid_struct car_toid，这里中间有一个空格，但可以通过定义这�
 
 
 
-TOID宏可以对指针更改类型，解引用时候通过D_RO和D_RW宏读写
+TOID宏可以对指针更改类型，解引用时候通过D_RO和D_RW宏读写，不再需要用pmemobj_direct
 
 ```c++
 TOID(struct my_root) root;
